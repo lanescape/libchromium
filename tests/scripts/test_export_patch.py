@@ -71,6 +71,9 @@ class RewriteHeader(unittest.TestCase):
         self.assertEqual(export_patch.owner('v8x/foo.h', repos), '')
 
 
+# GN files whose edits each add only what the SDK's switch guards, and GN syntax around it.
+GUARDED = ('mojo/public/tools/bindings/mojom.gni', 'components/embedder_support/BUILD.gn',
+           'ui/events/blink/BUILD.gn')
 # The one file the patches change for a reason other than the SDK's switch.
 TOC_FIX = 'build/toolchain/apple/linker_driver.py'
 
@@ -89,10 +92,26 @@ class CarriedPatches(unittest.TestCase):
 
     def test_patches_only_add_the_sdk_switch(self):
         """Every line the carried patches add mentions the SDK's switch, or is a comment or GN syntax around it,
-        or is in the linker driver's TOC fix, the one change that isn't the switch's."""
+        or is in the linker driver's TOC fix, the one change that isn't the switch's, or in an edit of GUARDED, each
+        of which branches on the switch."""
         fix = {line for path, old, new in export_patch.EDITS if path == TOC_FIX
                for line in set(new.splitlines()) - set(old.splitlines())}
         self.assertTrue(fix)
+        guarded_edits = [(path, old, new) for path, old, new in export_patch.EDITS if path in GUARDED]
+        self.assertEqual({path for path, _, _ in guarded_edits}, set(GUARDED))
+        for path, old, new in guarded_edits:
+            self.assertIn(f'if ({export_patch.ARG}', new)
+            if path == GUARDED[0]:
+                # The mojom template's edits keep all of its own text, and only add blocks the switch guards.
+                self.assertIn(old, new)
+            else:
+                # The other two keep every line they replace but the target's declaration, in order.
+                kept = [line for line in old.splitlines() if not line.startswith(('static_library(', 'source_set('))]
+                remaining = iter(new.splitlines())
+                self.assertTrue(all(line in remaining for line in kept), path)
+                self.assertIn('"user_agent")' if 'embedder_support' in path else 'source_set("blink")', new)
+        guarded = {path: {line for edit_path, _, new in guarded_edits if edit_path == path for line in new.splitlines()}
+                   for path in GUARDED}
         for patch in sorted((REPO/'chromium/patches').glob('**/*.patch')):
             path = None
             for line in patch.read_text().splitlines():
@@ -102,6 +121,9 @@ class CarriedPatches(unittest.TestCase):
                     continue
                 if path == TOC_FIX:
                     self.assertIn(line[1:], fix, f'{patch.name}: {line}')
+                    continue
+                if path in GUARDED:
+                    self.assertIn(line[1:], guarded[path], f'{patch.name}: {line}')
                     continue
                 body = line[1:].strip()
                 if not body or body.startswith(('#', '//')) and 'COMPONENT_BUILD' not in body:

@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -32,6 +33,21 @@ HEADER_ROOTS = (
 # Shipped whole: Chromium's libc++, libc++abi and libc++'s configuration for Chromium.
 LIBCXX_TREES = ('third_party/libc++/src/include', 'third_party/libc++abi/src/include', 'buildtools/third_party/libc++')
 SERVICE_ROOT = re.compile(r'^//services/[^/:]+/public(/|:|$)')
+# Chromium's mojom bindings generator and the libraries it imports, as Chromium has them, so that an embedder
+# generates the C++ bindings of mojoms of its own that import Chromium's (specs/0001-sdk.md, Mojom).
+MOJOM_TOOLS = ('mojo/public/tools/mojom', 'mojo/public/tools/bindings', 'third_party/jinja2', 'third_party/markupsafe',
+               'third_party/ply', 'build/action_helpers.py', 'build/gn_helpers.py', 'build/zip_helpers.py')
+MOJOM_TOOLS_SKIP = ('*_unittest.py', '__pycache__', '*.pyc')
+# Generated sources whose closure joins the headers: Mojo's base types', which include what any generated
+# bindings' sources include beyond their headers, such as mojo_buildflags.h.
+# The headers the generator writes for a mojom's default variant beside its .mojom.h. An embedder's generated
+# bindings include an imported mojom's, so each importable mojom ships them all (mojom_companions()).
+MOJOM_COMPANIONS = ('-forward.h', '-import-headers.h', '-shared.h', '-shared-internal.h', '-data-view.h',
+                    '-params-data.h', '-send-validation.h', '-features.h', '-shared-message-ids.h')
+# The licences of the libraries the mojom tools import, which ship beside them rather than in CREDITS.html
+# (specs/0004-licences.md): packaging stops without them.
+MOJOM_LICENCES = ('third_party/jinja2/LICENSE.rst', 'third_party/markupsafe/LICENSE', 'third_party/ply/LICENSE')
+MOJOM_SOURCES = ('gen/mojo/public/mojom/base/*.mojom.cc', 'gen/mojo/public/mojom/base/*.mojom-shared.cc')
 
 # Compile flags that are about Chromium's own build rather than what its headers need: diagnostics, warnings,
 # optimisation, debug information, profiles, LTO and Chromium's style plugins. An embedder picks its own.
@@ -229,9 +245,14 @@ def gn_json(src, out, *args):
                                               cwd=src, text=True, env=sdk.env()))
 
 
-def root_headers(src, out):
+def linked_labels(src, out):
+    """Every target the library is built from, in the target's toolchain."""
+    return {label for label in gn_json(src, out, '//libchromium:chromium', 'deps', '--all')['//libchromium:chromium']['deps']
+            if '(' not in label}
+
+
+def root_headers(src, out, linked):
     """The headers of the library's public targets, as paths relative to the build directory."""
-    linked = set(gn_json(src, out, '//libchromium:chromium', 'deps', '--all')['//libchromium:chromium']['deps'])
     described = {}
     for field in ('sources', 'public'):
         for label, fields in gn_json(src, out, '//*', field).items():
@@ -254,6 +275,182 @@ def root_headers(src, out):
     out_label = '//'+Path(out).relative_to(src).as_posix()+'/'
     return sorted('gen/'+path[len(out_label)+4:] if path.startswith(out_label+'gen/')
                   else '../../'+path[2:] for path in roots)
+
+
+def mojom_sources(out):
+    """MOJOM_SOURCES, relative to the build directory. None stops the packaging: Chromium has moved them."""
+    found = sorted(path.relative_to(out).as_posix() for pattern in MOJOM_SOURCES for path in Path(out).glob(pattern))
+    if not found:
+        raise SystemExit(f'no generated sources match {", ".join(MOJOM_SOURCES)}: has Chromium moved Mojo\'s base types?')
+    return found
+
+
+def mojom_companions(shipped, out):
+    """The companion headers (MOJOM_COMPANIONS) of every mojom whose .mojom.h ships, that the build has and that
+    don't ship yet, as roots relative to the build directory."""
+    roots = []
+    for relative in sorted(shipped):
+        match = re.fullmatch(r'gen/(.+\.mojom)\.h', relative)
+        if not match:
+            continue
+        for suffix in MOJOM_COMPANIONS:
+            companion = f'gen/{match.group(1)}{suffix}'
+            if companion not in shipped and (Path(out)/companion).is_file():
+                roots.append(companion)
+    return roots
+
+
+def absent_companions(shipped, out):
+    """The mojoms whose .mojom.h ships but one of whose companions the build doesn't have, which can't be
+    imported: an embedder's generated bindings would include the missing header."""
+    absent = set()
+    for relative in shipped:
+        match = re.fullmatch(r'gen/(.+\.mojom)\.h', relative)
+        if match and any(f'gen/{match.group(1)}{suffix}' not in shipped and
+                         not (Path(out)/f'gen/{match.group(1)}{suffix}').is_file() for suffix in MOJOM_COMPANIONS):
+            absent.add(match.group(1))
+    return absent
+
+
+def companion_mojom(root):
+    """The mojom a companion header root (mojom_companions()) belongs to, as its path under gen/."""
+    for suffix in MOJOM_COMPANIONS:
+        if root.endswith(suffix):
+            return root.removeprefix('gen/').removesuffix(suffix)
+    raise ValueError(f'{root} is no mojom\'s companion header')
+
+
+def mojom_files(headers, src, out, incomplete=()):
+    """The .mojom source and parsed module of every mojom whose C++ bindings ship, keyed by where each goes in the
+    headers part: a source from the checkout under include/, one the build generated under gen/, as in Chromium,
+    and every module under gen/. A mojom whose bindings ship without its source or module stops the packaging,
+    since an embedder's mojom that imports it couldn't be parsed. One whose companion headers don't all ship
+    (incomplete) isn't importable, so its source and module stay out: an import of it fails at once, by name."""
+    files, missing = {}, []
+    for relative in sorted(headers):
+        match = re.fullmatch(r'gen/(.+\.mojom)\.h', relative)
+        if not match or match.group(1) in incomplete:
+            continue
+        name = match.group(1)
+        module = Path(out)/'gen'/(name+'-module')
+        if (Path(src)/name).is_file():
+            source, destination = Path(src)/name, f'include/{name}'
+        else:
+            source, destination = Path(out)/'gen'/name, f'gen/{name}'
+        if not module.is_file() or not source.is_file():
+            missing.append(name)
+            continue
+        files[f'gen/{name}-module'] = module
+        files[destination] = source
+    if missing:
+        raise SystemExit(f'{len(missing)} mojoms whose bindings ship have no source or parsed module, such as '
+                         f'{", ".join(missing[:5])}')
+    return files
+
+
+def mapping_headers(mappings, src, out):
+    """The headers the type mappings name, as roots relative to the build directory: an embedder's generated
+    bindings include them, whether or not any of Chromium's public headers do. A header that is in neither the
+    checkout nor the build stops the packaging."""
+    roots, missing = set(), set()
+    for mapping in mappings['c++'].values():
+        for header in mapping.get('public_headers', []) + mapping.get('traits_headers', []):
+            if (Path(src)/header).is_file():
+                roots.add('../../'+header)
+            elif (Path(out)/'gen'/header).is_file():
+                roots.add('gen/'+header)
+            else:
+                missing.add(header)
+    if missing:
+        raise SystemExit(f'the type mappings name {len(missing)} headers that are neither in the checkout nor in '
+                         f'the build, such as {", ".join(sorted(missing)[:5])}')
+    return sorted(roots)
+
+
+def unshipped_mapping_headers(roots, headers):
+    """The mappings' header roots that aren't among the headers that ship, as the part holds them."""
+    shipped = set(headers)
+    return sorted(root for root in roots if rewrite_path(root, [('gen', 'gen'), ('../..', 'include')]) not in shipped)
+
+
+def type_mappings(linked, out):
+    """The C++ type mappings of every mojom target the library is built from, merged into one file for an
+    embedder's generator. Blink's variant maps the same types to Blink's own, so it's left out: an embedder's
+    bindings are the default variant."""
+    merged = {}
+    for label in sorted(linked):
+        directory, _, name = label.partition(':')
+        if not name.endswith('__type_mappings') or name.removesuffix('__type_mappings').endswith('_blink'):
+            continue
+        path = Path(out)/'gen'/directory[2:]/name
+        for typename, mapping in json.loads(path.read_text()).get('c++', {}).items():
+            if merged.setdefault(typename, mapping) != mapping:
+                raise SystemExit(f'{typename} is mapped to C++ two ways, the second by {label}')
+    return {'c++': merged}
+
+
+def module_namespaces(modules, src):
+    """Every mojom namespace the parsed modules reach: their own, and those of every module any kind they hold
+    belongs to, through fields, parameters and imported kinds, read with Chromium's own mojom package from the
+    checkout. An embedder's bindings for a type that imports any of these can need those types' mappings."""
+    tools = str(Path(src)/'mojo/public/tools/mojom')
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from mojom.generate import module as mojom_module
+    namespaces = set()
+    for path in modules:
+        with open(path, 'rb') as stream:
+            loaded = mojom_module.Module.Load(stream)
+        # By identity, within one module's graph, which stays alive while it's walked: ids are reused once freed.
+        pending, seen = [loaded], set()
+        while pending:
+            item = pending.pop()
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
+            if isinstance(item, (list, tuple, set)):
+                pending.extend(item)
+            elif isinstance(item, dict):
+                pending.extend(item.values())
+            elif type(item).__module__ == mojom_module.__name__:
+                if isinstance(item, mojom_module.Module):
+                    namespaces.add(item.mojom_namespace)
+                pending.extend(vars(item).values())
+    return namespaces
+
+
+def drop_unusable_mappings(mappings, missing, namespaces):
+    """Drops the type mappings that name a header that doesn't ship (missing, as roots), if no importable mojom can
+    reach their type: no shipped module reaches the type's namespace (module_namespaces()), so no embedder's
+    bindings can use the type, and nothing includes the header. One whose namespace a shipped module reaches stops
+    the packaging, whichever target declared the mapping, and so does any, if a reachable module has no namespace.
+    Returns the dropped types."""
+    dropped = []
+    for typename, mapping in list(mappings['c++'].items()):
+        if not mapping_roots(mapping) & set(missing):
+            continue
+        if '' in namespaces or any(typename.startswith(namespace+'.') for namespace in namespaces):
+            raise SystemExit(f'{typename} is mapped to a header that doesn\'t ship, yet a shipped mojom module '
+                             'declares its namespace')
+        del mappings['c++'][typename]
+        dropped.append(typename)
+    return dropped
+
+
+def mapping_roots(mapping):
+    """A mapping's headers, as mapping_headers() names them as roots."""
+    return {prefix+header for header in mapping.get('public_headers', []) + mapping.get('traits_headers', [])
+            for prefix in ('../../', 'gen/')}
+
+
+def mojom_features(src, out):
+    """The features the build parsed Chromium's mojoms with, which an embedder's must be parsed with too."""
+    label = '//mojo/public/mojom/base:base__parser_action'
+    args = gn_json(src, out, label, 'args')[label]['args']
+    features = [args[i+1] for i, arg in enumerate(args[:-1]) if arg == '--enable-feature']
+    if not features:
+        raise SystemExit(f'{label} parses with no --enable-feature: has Chromium changed how mojoms are parsed?')
+    return features
 
 
 def closure(variables, out, roots, language, jobs):
@@ -382,17 +579,41 @@ def package(target, checkout, out, version, output, quick=False):
         languages['objective-c++'] = compile_flags(compile_argv(variables, 'objective-c++'), mapping)[0]
     ldflags, libraries, system_libs, frameworks = link_flags(variables, mapping)
 
-    # Headers: the closure of the public targets' headers under those flags.
-    roots = root_headers(src, out)
+    # Headers: the closure of the public targets' headers under those flags, and of Mojo's base types' generated
+    # sources, whose own includes any embedder's generated bindings need.
+    linked = linked_labels(src, out)
+    mappings = type_mappings(linked, out)
+    mapped = mapping_headers(mappings, src, out)
+    sources = set(mojom_sources(out))
+    roots = sorted(set(root_headers(src, out, linked)) | sources | set(mapped))
     files, failed = closure(variables, out, roots, 'objective-c++' if system == 'mac' else 'c++',
                             os.cpu_count() or 8)
     headers = {}
     for path in sorted(files):
+        if path in sources:
+            continue
         rewritten = rewrite_path(path, [('gen', 'gen'), ('../..', 'include')])
         if rewritten and not path.startswith(('../../third_party/llvm-build/', f'../../{entry.get("sysroot", "-")}/',
                                               '../../build/mac_files/')):
             headers[rewritten] = out/path
     summary(f'{target}: {len(headers)} headers from {len(roots)-len(failed)} of {len(roots)} root headers')
+
+    # The companion headers of every mojom whose bindings ship, and what they include, until no new mojom's
+    # bindings join. A mojom with a companion that doesn't preprocess isn't importable (mojom_files()).
+    incomplete, tried = set(), set()
+    while companions := [root for root in mojom_companions(headers, out)
+                         if root not in tried and companion_mojom(root) not in incomplete]:
+        tried.update(companions)
+        files, unpreprocessed = closure(variables, out, companions, 'objective-c++' if system == 'mac' else 'c++',
+                                        os.cpu_count() or 8)
+        incomplete |= {companion_mojom(root) for root in unpreprocessed}
+        for path in sorted(files):
+            rewritten = rewrite_path(path, [('gen', 'gen'), ('../..', 'include')])
+            if rewritten and not path.startswith(('../../third_party/llvm-build/',
+                                                  f'../../{entry.get("sysroot", "-")}/', '../../build/mac_files/')):
+                headers[rewritten] = out/path
+    incomplete |= absent_companions(headers, out)
+    summary(f'{target}: {len(headers)} headers with mojoms\' companions; {len(incomplete)} mojoms not importable')
 
     parts = {}
 
@@ -438,11 +659,34 @@ def package(target, checkout, out, version, output, quick=False):
         for path in (src/tree).rglob('*'):
             if path.is_file():
                 headers[f'include/{path.relative_to(src).as_posix()}'] = path
+    # A mapping whose header doesn't ship, because it doesn't preprocess with the SDK's flags, would make an
+    # embedder's generated bindings include a file the SDK lacks.
+    # Mojom: what an embedder needs to generate its own mojoms' bindings, beside the headers they compile against.
+    importable = mojom_files(headers, src, out, incomplete)
+    if unshipped := unshipped_mapping_headers(mapped, headers):
+        namespaces = module_namespaces([path for name, path in importable.items() if name.endswith('-module')], src)
+        dropped = drop_unusable_mappings(mappings, unshipped, namespaces)
+        summary(f'{target}: dropped {len(dropped)} type mappings whose headers don\'t ship, in namespaces no '
+                f'importable mojom reaches: {", ".join(dropped)}')
+    headers.update(importable)
     headers_dir = part('headers')
     for relative, source in headers.items():
         destination = headers_dir/relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
+
+    for tool in MOJOM_TOOLS:
+        source, destination = src/tool, headers_dir/'mojom'/tool
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, destination, ignore=shutil.ignore_patterns(*MOJOM_TOOLS_SKIP))
+        else:
+            shutil.copy2(source, destination)
+    (headers_dir/'mojom').mkdir(exist_ok=True)
+    if missing := [name for name in MOJOM_LICENCES if not (headers_dir/'mojom'/name).is_file()]:
+        raise SystemExit(f'the mojom tools ship without their licences: {", ".join(missing)}')
+    (headers_dir/'mojom/type_mappings.json').write_text(json.dumps(mappings, indent=1, sort_keys=True)+'\n')
+    features = mojom_features(src, out)
 
     toolchain = part('toolchain')/'toolchain'
     clang_version = copy_toolchain(toolchain_src, toolchain, entry)
@@ -474,6 +718,14 @@ def package(target, checkout, out, version, output, quick=False):
         'system_include_dirs': system_includes,
         'compile': languages,
         'link': {'flags': ldflags, 'libraries': libraries, 'system_libs': system_libs, 'frameworks': frameworks},
+        'mojom': {
+            'parser': '{sdk}/mojom/mojo/public/tools/mojom/mojom_parser.py',
+            'generator': '{sdk}/mojom/mojo/public/tools/bindings/mojom_bindings_generator.py',
+            'imports': ['{sdk}/include', '{sdk}/gen'],
+            'modules': '{sdk}/gen',
+            'type_mappings': '{sdk}/mojom/type_mappings.json',
+            'features': features,
+        },
         'runtime': {'libraries': runtime_libraries,
                     'resources': sorted(p.relative_to(lib).as_posix() for p in resources.rglob('*') if p.is_file())},
         'unpreprocessed_root_headers': len(failed),

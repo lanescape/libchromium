@@ -1,0 +1,13 @@
+// The test embedder's own interface between the browser and a frame's renderer (embedder.cc), generated and
+// compiled with the SDK's mojom tooling alone (build.py; specs/0001-sdk.md, Mojom). It imports Chromium's types,
+// one of them mapped to its C++ class, so it needs the SDK's modules and type mappings as well as its generator.
+module embedder.mojom;
+
+import "mojo/public/mojom/base/string16.mojom";
+import "ui/gfx/geometry/mojom/geometry.mojom";
+
+// Associated with the frame's channel, as an embedder's per-frame interfaces usually are.
+interface Probe {
+  // Answers with the document's title, as Blink has it, and the rectangle it was sent.
+  Read(gfx.mojom.Rect rect) => (mojo_base.mojom.String16 title, gfx.mojom.Rect rect);
+};

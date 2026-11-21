@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Builds the test embedder against an extracted SDK, outside Chromium's tree, with nothing but the SDK's own
-toolchain and the flags in its sdk.json, as any build tool could (specs/0001-sdk.md, Compiling and linking):
+toolchain and the flags in its sdk.json, as any build tool could (specs/0001-sdk.md, Compiling and linking), and
+generates its own mojom's bindings with the SDK's mojom tooling (specs/0001-sdk.md, Mojom):
 
     build.py --sdk <extracted SDK> --output <directory> [--apple-sdk <MacOSX.sdk>]
 
@@ -19,6 +20,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 EXECUTABLE = 'libchromium-test-embedder'
+# The embedder's own mojoms, relative to the repository's root, from which they import as Chromium's do from its.
+MOJOMS = ('tests/embedder/probe.mojom',)
 
 
 def expand(value, sdk, apple_sdk):
@@ -30,15 +33,46 @@ def expand(value, sdk, apple_sdk):
     return value
 
 
-def compile_command(description, language, source, output, sdk, apple_sdk):
+def generate_bindings(description, sdk, output):
+    """Generates MOJOMS' C++ bindings under <output>/gen as Chromium's build would, and returns their sources: parse
+    each into a module, against the SDK's modules of what it imports; precompile the generator's templates; then
+    generate the shared code, the message IDs and the bindings themselves, with the SDK's type mappings."""
+    mojom = {key: [expand(item, sdk, None) for item in value] if isinstance(value, list) else expand(value, sdk, None)
+             for key, value in description['mojom'].items() if key != 'features'}
+    features = description['mojom']['features']
+    gen, templates = output/'gen', output/'mojom-templates'
+    templates.mkdir(parents=True)
+    # -B: nothing written beside the SDK's generator.
+    python = [sys.executable, '-B']
+    commands = [
+        python + [mojom['parser'], '--input-root', str(REPO)] +
+        [part for root in mojom['imports'] for part in ('--input-root', root)] +
+        ['--module-root', mojom['modules'], '--output-root', str(gen), '--mojoms', *(str(REPO/name) for name in MOJOMS)] +
+        [part for feature in features for part in ('--enable-feature', feature)],
+        python + [mojom['generator'], '-o', str(templates), '--use_bundled_pylibs', 'precompile', '-g', 'c++'],
+    ]
+    generate = python + [mojom['generator'], '--use_bundled_pylibs', '-o', str(gen), 'generate', '-d', str(REPO),
+                         '-I', str(REPO), '--bytecode_path', str(templates), '-g', 'c++']
+    mojoms = [str(REPO/name) for name in MOJOMS]
+    for extra in (['--generate_non_variant_code'], ['--generate_non_variant_code', '--generate_message_ids'],
+                  ['--typemap', mojom['type_mappings']]):
+        commands.append(generate + extra + mojoms)
+    for command in commands:
+        subprocess.run(command, check=True)
+    return [gen/(name+suffix) for name in MOJOMS for suffix in ('.cc', '-shared.cc')]
+
+
+def compile_command(description, language, source, output, sdk, apple_sdk, gen):
     flags = [expand(flag, sdk, apple_sdk) for flag in description['compile'][language]]
     defines = ['-D'+define for define in description['defines']]
     includes = ['-I'+expand(path, sdk, apple_sdk) for path in description['include_dirs']]
     system = [part for path in description['system_include_dirs'] for part in ('-isystem', expand(path, sdk,
                                                                                                   apple_sdk))]
-    # The embedder's own headers, found from the repository's root as Chromium's are from its.
+    # The embedder's own headers, and its generated bindings', found from the repository's root and the output's
+    # gen as Chromium's are from its.
     return ([expand(description['toolchain']['cxx'], sdk, apple_sdk), '-x', language] + flags + defines +
-            ['-I'+str(REPO)] + includes + system + ['-O2', '-c', str(source), '-o', str(output)])
+            ['-I'+str(REPO), '-I'+str(gen)] + includes + system +
+            ['-O2', '-c', str(source), '-o', str(output)])
 
 
 def link_command(description, objects, output, sdk, apple_sdk):
@@ -69,14 +103,15 @@ def main():
         shutil.rmtree(output)
     objects_dir = output/'obj'
     objects_dir.mkdir(parents=True)
-    sources = [(HERE/'embedder.cc', 'c++')]
+    sources = [(source, 'c++') for source in generate_bindings(description, sdk, output)]
+    sources.append((HERE/'embedder.cc', 'c++'))
     sources.append((HERE/'platform_mac.mm', 'objective-c++') if mac else (HERE/'platform_aura.cc', 'c++'))
     commands = []
     objects = []
     for source, language in sources:
-        obj = objects_dir/(source.stem+'.o')
+        obj = objects_dir/(source.name+'.o')
         objects.append(obj)
-        commands.append(compile_command(description, language, source, obj, sdk, args.apple_sdk))
+        commands.append(compile_command(description, language, source, obj, sdk, args.apple_sdk, output/'gen'))
     with concurrent.futures.ThreadPoolExecutor() as pool:
         results = list(pool.map(lambda command: subprocess.run(command), commands))
     for command, result in zip(commands, results):
@@ -92,7 +127,8 @@ def main():
         relative = Path(resource).relative_to('resources')
         (output/relative).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(sdk/resource, output/relative)
-    shutil.rmtree(objects_dir)
+    for directory in (objects_dir, output/'gen', output/'mojom-templates'):
+        shutil.rmtree(directory)
     print(f'built {executable}')
     return 0
 

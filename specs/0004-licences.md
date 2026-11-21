@@ -7,13 +7,13 @@ This repository's own files are under the MIT License (`LICENSE`). What it publi
 Every target's `notices/` directory, in the `lib` part and as the `notices` part, holds:
 
 - `LICENSE.chromium`, Chromium's licence;
-- `CREDITS.html`, the licences of every third-party component the SDK's targets link or ship, made by Chromium's `tools/licenses/licenses.py credits` over `//libchromium:libchromium`;
+- `CREDITS.html`, the licences of every third-party component the SDK's targets link or ship (but for the mojom tools, below), made by Chromium's `tools/licenses/licenses.py credits` over `//libchromium:libchromium`;
 - `LICENSE.libchromium`, this repository's licence;
 - `components.json`, each of those components, its licence, its directory, and whether its corresponding source is published with the version (`copyleft`), and if it is, the directories its source asset holds (`source_dirs`), its own and a Rust crate's vendored source, how many files they hold (`source_files`), and the SHA-256 of their listing, each entry's path, kind, size and link target, as the asset holds them (`source_listing`);
 - `gaps/`, the licence texts of the components Chromium's metadata can't credit at the pin, which `chromium/licence-gaps.json` lists, each with its licence, the files whose texts ship and why. Packaging fails if Chromium's metadata has any error that list doesn't explain, so a new gap is reviewed before anything ships;
-- `README`, which says what each of these is, and where Chromium's own source at the pin and this repository's patch at the version's tag are (Corresponding source, below).
+- `README`, which says what each of these is, that the mojom tools' licences are beside them rather than in `CREDITS.html`, and where Chromium's own source at the pin and this repository's patch at the version's tag are (Corresponding source, below).
 
-The toolchain is LLVM's, under the Apache License 2.0 with LLVM Exceptions, whose text ships as `toolchain/LICENSE.TXT`. The sysroots' packages' copyright files are in their Debian source, below.
+The toolchain is LLVM's, under the Apache License 2.0 with LLVM Exceptions, whose text ships as `toolchain/LICENSE.TXT`. The mojom tools in the `headers` part's `mojom/` (specs/0001-sdk.md, Mojom) are Chromium's, under its licence, with Jinja, MarkupSafe and PLY, each under the BSD 3-clause licence whose text ships in its own directory. The sysroots' packages' copyright files are in their Debian source, below.
 
 ## Corresponding source
 

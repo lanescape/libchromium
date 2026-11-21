@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from tests.scripts.common import REPO  # noqa: F401
 import package
@@ -133,6 +136,143 @@ class Flags(unittest.TestCase):
         self.assertEqual(package.rewrite_path('../../base/foo.h', mapping), '{sdk}/include/base/foo.h')
         self.assertEqual(package.rewrite_path('gen/base/foo.h', mapping), '{sdk}/gen/base/foo.h')
         self.assertIsNone(package.rewrite_path('/usr/include/stdio.h', mapping))
+
+
+class Mojom(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.src, self.out = self.tmp/'src', self.tmp/'src/out/x'
+        for path in ('ui/gfx/geometry/mojom/geometry.mojom', 'mojo/public/mojom/base/time.mojom',
+                     'content/common/hidden.mojom'):
+            (self.src/path).parent.mkdir(parents=True, exist_ok=True)
+            (self.src/path).write_text('module x;')
+        for path in ('ui/gfx/geometry/mojom/geometry.mojom-module', 'mojo/public/mojom/base/time.mojom-module',
+                     'content/common/hidden.mojom-module', 'mojo/public/mojom/base/time.mojom.cc',
+                     'mojo/public/mojom/base/time.mojom-shared.cc', 'mojo/public/mojom/base/time.mojom.h'):
+            (self.out/'gen'/path).parent.mkdir(parents=True, exist_ok=True)
+            (self.out/'gen'/path).write_text('')
+
+    def test_modules_and_sources_of_shipped_bindings_only(self):
+        headers = {'gen/ui/gfx/geometry/mojom/geometry.mojom.h': None, 'gen/mojo/public/mojom/base/time.mojom.h': None,
+                   'gen/ui/gfx/geometry/mojom/geometry.mojom-shared.h': None, 'include/base/time/time.h': None}
+        files = package.mojom_files(headers, self.src, self.out)
+        self.assertEqual(sorted(files), [
+            'gen/mojo/public/mojom/base/time.mojom-module', 'gen/ui/gfx/geometry/mojom/geometry.mojom-module',
+            'include/mojo/public/mojom/base/time.mojom', 'include/ui/gfx/geometry/mojom/geometry.mojom'])
+        self.assertEqual(files['include/ui/gfx/geometry/mojom/geometry.mojom'],
+                         self.src/'ui/gfx/geometry/mojom/geometry.mojom')
+
+    def test_a_generated_mojom_ships_under_gen(self):
+        for path in ('third_party/blink/public/mojom/origin_trial_feature.mojom',
+                     'third_party/blink/public/mojom/origin_trial_feature.mojom-module'):
+            (self.out/'gen'/path).parent.mkdir(parents=True, exist_ok=True)
+            (self.out/'gen'/path).write_text('')
+        files = package.mojom_files({'gen/third_party/blink/public/mojom/origin_trial_feature.mojom.h': None},
+                                    self.src, self.out)
+        self.assertEqual(sorted(files), ['gen/third_party/blink/public/mojom/origin_trial_feature.mojom',
+                                         'gen/third_party/blink/public/mojom/origin_trial_feature.mojom-module'])
+
+    def test_a_mojom_whose_bindings_ship_without_its_source_or_module_stops_the_packaging(self):
+        (self.src/'content/common/hidden.mojom').unlink()
+        with self.assertRaisesRegex(SystemExit, 'content/common/hidden.mojom'):
+            package.mojom_files({'gen/content/common/hidden.mojom.h': None}, self.src, self.out)
+        with self.assertRaisesRegex(SystemExit, 'content/common/absent.mojom'):
+            package.mojom_files({'gen/content/common/absent.mojom.h': None}, self.src, self.out)
+
+    def test_the_mappings_headers_are_roots(self):
+        (self.src/'media/mojo/mojom').mkdir(parents=True)
+        (self.src/'media/mojo/mojom/video_decoder_config_mojom_traits.h').write_text('')
+        (self.out/'gen/media/base').mkdir(parents=True)
+        (self.out/'gen/media/base/generated.h').write_text('')
+        mappings = {'c++': {'media.mojom.VideoDecoderConfig': {
+            'public_headers': ['media/base/generated.h'],
+            'traits_headers': ['media/mojo/mojom/video_decoder_config_mojom_traits.h']}}}
+        roots = package.mapping_headers(mappings, self.src, self.out)
+        self.assertEqual(roots, ['../../media/mojo/mojom/video_decoder_config_mojom_traits.h',
+                                 'gen/media/base/generated.h'])
+        shipped = {'include/media/mojo/mojom/video_decoder_config_mojom_traits.h': None}
+        self.assertEqual(package.unshipped_mapping_headers(roots, shipped), ['gen/media/base/generated.h'])
+        shipped['gen/media/base/generated.h'] = None
+        self.assertEqual(package.unshipped_mapping_headers(roots, shipped), [])
+
+    def test_unusable_mappings_are_dropped_and_usable_ones_stop_the_packaging(self):
+        action = {'public_headers': [], 'traits_headers': ['components/x/traits.h']}
+        string16 = {'public_headers': ['base/strings/string16.h'], 'traits_headers': []}
+        mappings = {'c++': {'omnibox.mojom.Action': action, 'mojo_base.mojom.String16': string16}}
+        dropped = package.drop_unusable_mappings(mappings, ['../../components/x/traits.h'], {'mojo_base.mojom'})
+        self.assertEqual(dropped, ['omnibox.mojom.Action'])
+        self.assertEqual(list(mappings['c++']), ['mojo_base.mojom.String16'])
+        mappings['c++']['omnibox.mojom.Action'] = action
+        with self.assertRaisesRegex(SystemExit, 'omnibox.mojom.Action is mapped'):
+            package.drop_unusable_mappings(mappings, ['../../components/x/traits.h'], {'omnibox.mojom'})
+        with self.assertRaisesRegex(SystemExit, 'omnibox.mojom.Action is mapped'):
+            package.drop_unusable_mappings(mappings, ['../../components/x/traits.h'], {'mojo_base.mojom', ''})
+
+    def test_a_mapping_header_that_is_nowhere_stops_the_packaging(self):
+        mappings = {'c++': {'x.mojom.Y': {'public_headers': ['media/base/absent.h'], 'traits_headers': []}}}
+        with self.assertRaisesRegex(SystemExit, 'media/base/absent.h'):
+            package.mapping_headers(mappings, self.src, self.out)
+
+    def test_mojo_base_generated_sources_are_roots(self):
+        self.assertEqual(package.mojom_sources(self.out), ['gen/mojo/public/mojom/base/time.mojom-shared.cc',
+                                                           'gen/mojo/public/mojom/base/time.mojom.cc'])
+
+    def test_companions_of_shipped_bindings_that_the_build_has(self):
+        for suffix in ('-forward.h', '-import-headers.h', '-shared.h', '-test-utils.h', '-blink.h'):
+            (self.out/f'gen/mojo/public/mojom/base/time.mojom{suffix}').write_text('')
+        shipped = {'gen/mojo/public/mojom/base/time.mojom.h': None, 'gen/mojo/public/mojom/base/time.mojom-shared.h': None}
+        self.assertEqual(package.mojom_companions(shipped, self.out),
+                         ['gen/mojo/public/mojom/base/time.mojom-forward.h',
+                          'gen/mojo/public/mojom/base/time.mojom-import-headers.h'])
+        self.assertEqual(package.companion_mojom('gen/mojo/public/mojom/base/time.mojom-import-headers.h'),
+                         'mojo/public/mojom/base/time.mojom')
+
+    def test_a_mojom_missing_a_companion_is_not_importable(self):
+        shipped = {'gen/mojo/public/mojom/base/time.mojom.h': None}
+        for suffix in package.MOJOM_COMPANIONS:
+            (self.out/f'gen/mojo/public/mojom/base/time.mojom{suffix}').write_text('')
+        self.assertEqual(package.absent_companions(shipped, self.out), set())
+        (self.out/'gen/mojo/public/mojom/base/time.mojom-import-headers.h').unlink()
+        self.assertEqual(package.absent_companions(shipped, self.out), {'mojo/public/mojom/base/time.mojom'})
+        shipped['gen/mojo/public/mojom/base/time.mojom-import-headers.h'] = None
+        self.assertEqual(package.absent_companions(shipped, self.out), set())
+
+    def test_a_mojom_with_a_companion_that_does_not_ship_is_not_importable(self):
+        headers = {'gen/ui/gfx/geometry/mojom/geometry.mojom.h': None, 'gen/mojo/public/mojom/base/time.mojom.h': None}
+        files = package.mojom_files(headers, self.src, self.out, incomplete={'ui/gfx/geometry/mojom/geometry.mojom'})
+        self.assertEqual(sorted(files), ['gen/mojo/public/mojom/base/time.mojom-module',
+                                         'include/mojo/public/mojom/base/time.mojom'])
+
+    def test_no_mojo_base_generated_sources_stops_the_packaging(self):
+        for path in (self.out/'gen/mojo/public/mojom/base').glob('*.cc'):
+            path.unlink()
+        with self.assertRaisesRegex(SystemExit, 'has Chromium moved'):
+            package.mojom_sources(self.out)
+
+    def write_mappings(self, label, mappings):
+        directory, _, name = label.partition(':')
+        path = self.out/'gen'/directory[2:]/name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'c++': mappings}))
+
+    def test_type_mappings_merge_without_blink_or_unlinked_targets(self):
+        rect = {'typename': '::gfx::Rect', 'public_headers': ['ui/gfx/geometry/mojom/geometry_mojom_traits.h']}
+        self.write_mappings('//ui/gfx/geometry/mojom:mojom__type_mappings', {'gfx.mojom.Rect': rect})
+        self.write_mappings('//ui/gfx/geometry/mojom:mojom_blink__type_mappings',
+                            {'gfx.mojom.Rect': {'typename': '::blink::Rect'}})
+        self.write_mappings('//mojo/public/mojom/base:base__type_mappings',
+                            {'gfx.mojom.Rect': rect, 'mojo_base.mojom.String16': {'typename': '::std::u16string'}})
+        self.write_mappings('//chrome/common:mojom__type_mappings', {'chrome.mojom.X': {'typename': '::X'}})
+        linked = {'//ui/gfx/geometry/mojom:mojom__type_mappings', '//ui/gfx/geometry/mojom:mojom_blink__type_mappings',
+                  '//mojo/public/mojom/base:base__type_mappings', '//ui/gfx/geometry/mojom:mojom'}
+        self.assertEqual(package.type_mappings(linked, self.out), {'c++': {
+            'gfx.mojom.Rect': rect, 'mojo_base.mojom.String16': {'typename': '::std::u16string'}}})
+
+    def test_a_type_mapped_two_ways_stops_the_packaging(self):
+        self.write_mappings('//a:mojom__type_mappings', {'gfx.mojom.Rect': {'typename': '::gfx::Rect'}})
+        self.write_mappings('//b:mojom__type_mappings', {'gfx.mojom.Rect': {'typename': '::other::Rect'}})
+        with self.assertRaisesRegex(SystemExit, 'gfx.mojom.Rect is mapped to C\\+\\+ two ways'):
+            package.type_mappings({'//a:mojom__type_mappings', '//b:mojom__type_mappings'}, self.out)
 
 
 if __name__ == '__main__':

@@ -104,6 +104,11 @@ class Package(unittest.TestCase):
                     mock.patch.object(package, 'compile_flags', return_value=([], [], [], [])), \
                     mock.patch.object(package, 'link_flags', return_value=([], [], [], [])), \
                     mock.patch.object(package, 'root_headers', return_value=['../../base/a.h']), \
+                    mock.patch.object(package, 'linked_labels', return_value=set()), \
+                    mock.patch.object(package, 'mojom_features', return_value=['is_posix', 'is_linux']), \
+                    mock.patch.object(package, 'MOJOM_TOOLS', ()), \
+                    mock.patch.object(package, 'MOJOM_LICENCES', ()), \
+                    mock.patch.object(package, 'mojom_sources', return_value=[]), \
                     mock.patch.object(package, 'closure', return_value=({'../../base/a.h'}, [])), \
                     mock.patch.object(package, 'runtime_files', return_value=['libffmpeg.so']), \
                     mock.patch.object(package, 'strip_libraries',

@@ -6,7 +6,7 @@ Targets are `linux-amd64`, `linux-arm64` and `macos-arm64`. Apple's SDK is never
 
 ## Using a version
 
-Each version is a GitHub release of this repository, tagged `v<Chromium tag>-<revision>`, such as `v157.0.8103.39-1`. Versions are not semver and promise no compatibility with each other: pin an exact version. For a target, download its `lib`, `headers` and `toolchain` parts, and on Linux its `sysroot`, check them against the release's `SHA256SUMS`, and extract them into one directory. Its `sdk.json` gives the compile and link flags, with paths relative to that directory, for any build tool; `tests/embedder/build.py` is a complete example. The toolchain runs on Linux x86-64. specs/0001-sdk.md says what a version holds and what an embedder must do.
+Each version is a GitHub release of this repository, tagged `v<Chromium tag>-<revision>`, such as `v157.0.8103.39-1`. Versions are not semver and promise no compatibility with each other: pin an exact version. For a target, download its `lib`, `headers` and `toolchain` parts, and on Linux its `sysroot`, check them against the release's `SHA256SUMS`, and extract them into one directory. Its `sdk.json` gives the compile and link flags, with paths relative to that directory, for any build tool, and where the `headers` part holds Chromium's mojom generator and what it needs to generate the C++ bindings of an embedder's own mojoms; `tests/embedder/build.py` is a complete example of both, and specs/0001-sdk.md gives the generator's commands. The toolchain runs on Linux x86-64. specs/0001-sdk.md says what a version holds and what an embedder must do.
 
 ## Building and testing
 
@@ -30,7 +30,7 @@ python3 scripts/check.py
 
 ## Specifications
 
-- specs/0001-sdk.md: what a version is and holds, `sdk.json`, the exports, libc++, the allocator and runtime files
+- specs/0001-sdk.md: what a version is and holds, `sdk.json`, the exports, mojom, libc++, the allocator and runtime files
 - specs/0002-build.md: the checkout, settings, patch, build and packaging
 - specs/0003-ci-cd.md: CI, CD, versions and publishing
 - specs/0004-licences.md: notices and corresponding source

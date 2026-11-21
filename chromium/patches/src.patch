@@ -428,6 +428,37 @@ index 5d1fa02a1c1..2ccaacde6a5 100644
  #if defined(WIN32)
  
  #if defined(COMPONENTS_DRIVE_IMPLEMENTATION)
+diff --git a/components/embedder_support/BUILD.gn b/components/embedder_support/BUILD.gn
+index 4fcfc8913e4..bf9ad41a194 100644
+--- a/components/embedder_support/BUILD.gn
++++ b/components/embedder_support/BUILD.gn
+@@ -49,11 +49,25 @@ static_library("permissions") {
+   }
+ }
+ 
+-static_library("user_agent") {
++if (libchromium_exports) {
++  # Exported, every object of it, from the shared library the SDK links,
++  # whose export list names it (libchromium).
++  config("user_agent_libchromium_exports") {
++    cflags = [ "-fvisibility=default" ]
++  }
++  _user_agent_type = "source_set"
++} else {
++  _user_agent_type = "static_library"
++}
++
++target(_user_agent_type, "user_agent") {
+   sources = [
+     "user_agent_utils.cc",
+     "user_agent_utils.h",
+   ]
++  if (libchromium_exports) {
++    configs += [ ":user_agent_libchromium_exports" ]
++  }
+ 
+   deps = [
+     ":embedder_support",
 diff --git a/components/gcm_driver/common/gcm_driver_export.h b/components/gcm_driver/common/gcm_driver_export.h
 index 9c767a3bdf5..d2375672b7d 100644
 --- a/components/gcm_driver/common/gcm_driver_export.h
@@ -1322,6 +1353,45 @@ index 808b1255f59..953220e98b8 100644
  
  #if defined(WIN32)
  
+diff --git a/mojo/public/tools/bindings/mojom.gni b/mojo/public/tools/bindings/mojom.gni
+index e5934d85804..83db1dad035 100644
+--- a/mojo/public/tools/bindings/mojom.gni
++++ b/mojo/public/tools/bindings/mojom.gni
+@@ -1031,11 +1031,23 @@ template("mojom") {
+ 
+   shared_cpp_sources_target_name = "${target_name}_shared_cpp_sources"
+ 
++  if (libchromium_exports) {
++    # Exported from the shared library the SDK links, so that an embedder's
++    # own mojoms can import this one (libchromium).
++    config("${target_name}__libchromium_exports") {
++      cflags = [ "-fvisibility=default" ]
++    }
++    _libchromium_exports_config = ":${target_name}__libchromium_exports"
++  }
++
+   source_set(shared_cpp_sources_target_name) {
+     if (defined(invoker.testonly)) {
+       testonly = invoker.testonly
+     }
+     configs += [ "//build/config/compiler:wexit_time_destructors" ]
++    if (libchromium_exports) {
++      configs += [ _libchromium_exports_config ]
++    }
+     deps = []
+     public_deps = []
+     if (output_file_base_paths != []) {
+@@ -1629,6 +1641,10 @@ template("mojom") {
+         defines = export_defines
+         configs += [ "//build/config/compiler:wexit_time_destructors" ]
+         configs += extra_configs
++        if (libchromium_exports && !(defined(bindings_configuration.for_blink) &&
++                                    bindings_configuration.for_blink)) {
++          configs += [ _libchromium_exports_config ]
++        }
+         if (output_file_base_paths != []) {
+           sources = []
+           foreach(base_path, output_file_base_paths) {
 diff --git a/net/base/net_export.h b/net/base/net_export.h
 index ca64828ac97..fb54c5b83bf 100644
 --- a/net/base/net_export.h
@@ -1825,6 +1895,29 @@ index 51f58f4046a..e0c0cf47879 100644
  
  #if defined(WIN32)
  
+diff --git a/ui/events/blink/BUILD.gn b/ui/events/blink/BUILD.gn
+index 82effa0b84c..1f1b25eb7c7 100644
+--- a/ui/events/blink/BUILD.gn
++++ b/ui/events/blink/BUILD.gn
+@@ -15,7 +15,18 @@ component("blink_features") {
+   deps = [ "//base" ]
+ }
+ 
++if (libchromium_exports) {
++  # Exported from the shared library the SDK links, whose export list names
++  # it (libchromium).
++  config("blink_libchromium_exports") {
++    cflags = [ "-fvisibility=default" ]
++  }
++}
++
+ source_set("blink") {
++  if (libchromium_exports) {
++    configs += [ ":blink_libchromium_exports" ]
++  }
+   sources = [
+     "blink_event_util.cc",
+     "blink_event_util.h",
 diff --git a/ui/events/devices/events_devices_export.h b/ui/events/devices/events_devices_export.h
 index f4990ce08b1..dd79ca0120a 100644
 --- a/ui/events/devices/events_devices_export.h
