@@ -28,11 +28,13 @@ python3 -m unittest discover --start-directory tests/scripts --top-level-directo
 python3 scripts/check.py
 ```
 
+These run on Python 3.13 or newer, with git, Bash, zstd and a `tar` that has `--zstd`. CI and CD support nothing older than Debian 13 on the organization's runner service, Ubuntu 26.04 on GitHub's runners and macOS 26.2 on Mac runners (specs/0003-ci-cd.md, Operating systems). That is where they run, not what a version's users need (specs/0001-sdk.md, Runtime files).
+
 ## Specifications
 
 - specs/0001-sdk.md: what a version is and holds, `sdk.json`, the exports, mojom, libc++, the allocator and runtime files
 - specs/0002-build.md: the checkout, settings, patch, build and packaging
-- specs/0003-ci-cd.md: CI, CD, versions and publishing
+- specs/0003-ci-cd.md: CI, CD and the systems they run on, versions and publishing
 - specs/0004-licences.md: notices and corresponding source
 
 ## Licences

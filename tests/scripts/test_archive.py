@@ -1,4 +1,3 @@
-import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -9,7 +8,6 @@ from tests.scripts.common import REPO  # noqa: F401
 import archive
 
 
-@unittest.skipUnless(shutil.which('zstd'), 'needs zstd')
 class Deterministic(unittest.TestCase):
     def test_same_files_same_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:

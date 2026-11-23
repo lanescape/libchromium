@@ -435,7 +435,6 @@ class Sources(StandInArchives):
             self.assertFalse((tmp/'manifest.json').exists())
 
 
-@unittest.skipUnless(shutil.which('zstd'), 'needs zstd')
 class Components(unittest.TestCase):
     def test_reads_the_notices_part(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -450,7 +449,6 @@ class Components(unittest.TestCase):
                 publish.components_of(tmp/'empty.tar.zst')
 
 
-@unittest.skipUnless(shutil.which('zstd'), 'needs zstd')
 class FromTheJobs(unittest.TestCase):
     """CD's publish job as it runs: each target's job output, its source made by `sdk.py sources` itself, gathered
     and checked by `manifest`. Only Chromium's licence metadata and Debian's downloads are stood in for."""

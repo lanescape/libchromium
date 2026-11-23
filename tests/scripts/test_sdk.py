@@ -433,7 +433,6 @@ class Reconcile(Checkout):
         self.assertEqual(ran, [('gn', 'gen', out)])
 
 
-@unittest.skipUnless(shutil.which('zstd'), 'needs zstd')
 class AppleSdk(unittest.TestCase):
     """step_mac_sdk, from an archive like the pinned one."""
 
